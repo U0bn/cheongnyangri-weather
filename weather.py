@@ -2,8 +2,9 @@ import os
 import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from urllib.parse import unquote
 
-KMA_API_KEY = os.environ["KMA_API_KEY"]
+KMA_API_KEY = unquote(os.environ["KMA_API_KEY"])
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
