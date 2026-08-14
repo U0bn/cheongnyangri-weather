@@ -5,10 +5,11 @@ import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import unquote
+from PIL import Image, ImageDraw, ImageFont
 
 
 # =========================================================
-# 환경변수
+# 기본 설정
 # =========================================================
 
 KMA_API_KEY = unquote(os.environ["KMA_API_KEY"])
@@ -17,19 +18,41 @@ AIRKOREA_API_KEY = unquote(os.environ["AIRKOREA_API_KEY"])
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-
-# =========================================================
-# 위치
-# =========================================================
-
-# 청량리동 기상청 격자
+# 청량리동
 NX = 61
 NY = 127
 
-# 에어코리아
 AIR_STATION = "동대문구"
 
 KST = ZoneInfo("Asia/Seoul")
+
+OUTPUT_FILE = "weather_card.png"
+
+
+# =========================================================
+# 폰트
+# =========================================================
+
+def get_font(size, bold=False):
+
+    candidates = []
+
+    if bold:
+        candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.otf",
+        ]
+    else:
+        candidates = [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf",
+        ]
+
+    for path in candidates:
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+
+    return ImageFont.load_default()
 
 
 # =========================================================
@@ -68,7 +91,6 @@ def get_base_datetime():
             available.append(dt)
 
     if available:
-
         base_dt = max(available)
 
     else:
@@ -89,7 +111,7 @@ def get_base_datetime():
 
 
 # =========================================================
-# 기상청 단기예보
+# 기상청 날씨
 # =========================================================
 
 def get_weather():
@@ -112,7 +134,6 @@ def get_weather():
         "ny": NY
     }
 
-    # 이전에 실제 성공했던 방식
     response = requests.get(
         url,
         params=params,
@@ -126,7 +147,6 @@ def get_weather():
     header = data["response"]["header"]
 
     if header["resultCode"] != "00":
-
         raise Exception(
             f'기상청 API 오류: '
             f'{header["resultCode"]} '
@@ -144,13 +164,12 @@ def get_weather():
 
 
 # =========================================================
-# 날씨 데이터 정리
+# 날씨 정리
 # =========================================================
 
 def parse_weather(items):
 
     now = datetime.now(KST)
-
     today = now.strftime("%Y%m%d")
 
     hourly = {}
@@ -163,61 +182,47 @@ def parse_weather(items):
         if item["fcstDate"] != today:
             continue
 
-        fcst_time = item["fcstTime"]
+        time = item["fcstTime"]
         category = item["category"]
         value = item["fcstValue"]
 
-        if fcst_time not in hourly:
-            hourly[fcst_time] = {}
+        if time not in hourly:
+            hourly[time] = {}
 
-        hourly[fcst_time][category] = value
+        hourly[time][category] = value
 
         if category == "TMN":
-
             try:
                 tmn = float(value)
-
-            except ValueError:
+            except:
                 pass
 
         if category == "TMX":
-
             try:
                 tmx = float(value)
-
-            except ValueError:
+            except:
                 pass
 
     if not hourly:
-
-        raise Exception(
-            "오늘 예보 데이터가 없습니다."
-        )
+        raise Exception("오늘 예보 데이터가 없습니다.")
 
     times = sorted(hourly.keys())
 
     current_hour = now.strftime("%H00")
 
-    future_times = [
-        t
-        for t in times
+    future = [
+        t for t in times
         if t >= current_hour
     ]
 
-    if future_times:
-
-        current_time = future_times[0]
-
+    if future:
+        current_time = future[0]
     else:
-
         current_time = times[-1]
 
     current = hourly[current_time]
 
-    current_temp = current.get(
-        "TMP",
-        "?"
-    )
+    current_temp = current.get("TMP", "?")
 
     temps = []
     pops = []
@@ -228,69 +233,41 @@ def parse_weather(items):
         values = hourly[time]
 
         if "TMP" in values:
-
             try:
-                temps.append(
-                    float(values["TMP"])
-                )
-
-            except ValueError:
+                temps.append(float(values["TMP"]))
+            except:
                 pass
 
         if "POP" in values:
-
             try:
-                pops.append(
-                    int(values["POP"])
-                )
-
-            except ValueError:
+                pops.append(int(values["POP"]))
+            except:
                 pass
 
         if "PCP" in values:
 
-            pcp = values["PCP"]
+            amount = values["PCP"]
 
-            if pcp not in [
+            if amount not in [
                 "강수없음",
                 "0",
                 "0.0"
             ]:
-
                 precip.append(
-                    (time, pcp)
+                    (time, amount)
                 )
 
-    # TMN/TMX가 없는 늦은 시각 발표에서는
-    # 임시로 남은 시간대의 TMP 사용
     if tmn is None:
-
-        tmn = (
-            min(temps)
-            if temps
-            else "?"
-        )
+        tmn = min(temps) if temps else "?"
 
     if tmx is None:
-
-        tmx = (
-            max(temps)
-            if temps
-            else "?"
-        )
-
-    max_pop = (
-        max(pops)
-        if pops
-        else 0
-    )
+        tmx = max(temps) if temps else "?"
 
     return {
-        "current_time": current_time,
         "current_temp": current_temp,
         "min_temp": tmn,
         "max_temp": tmx,
-        "max_pop": max_pop,
+        "max_pop": max(pops) if pops else 0,
         "precip": precip,
         "hourly": hourly
     }
@@ -306,31 +283,20 @@ def wet_bulb_temperature(temp, rh):
         temp
         * math.atan(
             0.151977
-            * math.sqrt(
-                rh + 8.313659
-            )
+            * math.sqrt(rh + 8.313659)
         )
-        + math.atan(
-            temp + rh
-        )
-        - math.atan(
-            rh - 1.67633
-        )
+        + math.atan(temp + rh)
+        - math.atan(rh - 1.67633)
         + 0.00391838
         * (rh ** 1.5)
-        * math.atan(
-            0.023101 * rh
-        )
+        * math.atan(0.023101 * rh)
         - 4.686035
     )
 
 
 def apparent_temperature(temp, rh):
 
-    tw = wet_bulb_temperature(
-        temp,
-        rh
-    )
+    tw = wet_bulb_temperature(temp, rh)
 
     return (
         -0.2442
@@ -344,9 +310,9 @@ def apparent_temperature(temp, rh):
 
 def get_max_apparent_temperature(hourly):
 
-    feels_list = []
+    result = []
 
-    for _, values in hourly.items():
+    for values in hourly.values():
 
         if (
             "TMP" not in values
@@ -355,29 +321,19 @@ def get_max_apparent_temperature(hourly):
             continue
 
         try:
-
-            temp = float(
-                values["TMP"]
-            )
-
-            humidity = float(
-                values["REH"]
-            )
-
-        except ValueError:
+            temp = float(values["TMP"])
+            rh = float(values["REH"])
+        except:
             continue
 
-        feels = apparent_temperature(
-            temp,
-            humidity
+        result.append(
+            apparent_temperature(
+                temp,
+                rh
+            )
         )
 
-        feels_list.append(feels)
-
-    if not feels_list:
-        return None
-
-    return max(feels_list)
+    return max(result) if result else None
 
 
 # =========================================================
@@ -414,18 +370,9 @@ def get_air_quality():
     data = response.json()
 
     items = (
-        data.get(
-            "response",
-            {}
-        )
-        .get(
-            "body",
-            {}
-        )
-        .get(
-            "items",
-            []
-        )
+        data.get("response", {})
+        .get("body", {})
+        .get("items", [])
     )
 
     if not items:
@@ -438,37 +385,22 @@ def get_air_quality():
 
     item = items[0]
 
-    pm10 = item.get(
-        "pm10Value"
-    )
+    pm10 = item.get("pm10Value")
+    pm25 = item.get("pm25Value")
 
-    pm25 = item.get(
-        "pm25Value"
-    )
-
-    data_time = item.get(
-        "dataTime",
-        "정보없음"
-    )
-
-    if pm10 in [
-        None,
-        "",
-        "-"
-    ]:
+    if pm10 in [None, "", "-"]:
         pm10 = None
 
-    if pm25 in [
-        None,
-        "",
-        "-"
-    ]:
+    if pm25 in [None, "", "-"]:
         pm25 = None
 
     return {
         "pm10": pm10,
         "pm25": pm25,
-        "data_time": data_time
+        "data_time": item.get(
+            "dataTime",
+            "정보없음"
+        )
     }
 
 
@@ -482,22 +414,20 @@ def pm10_grade(value):
         return "정보없음"
 
     try:
-        value = int(value)
-
-    except ValueError:
+        v = int(value)
+    except:
         return "정보없음"
 
-    if value <= 30:
+    if v <= 30:
         return "좋음"
 
-    elif value <= 80:
+    if v <= 80:
         return "보통"
 
-    elif value <= 150:
+    if v <= 150:
         return "나쁨"
 
-    else:
-        return "매우 나쁨"
+    return "매우 나쁨"
 
 
 def pm25_grade(value):
@@ -506,34 +436,63 @@ def pm25_grade(value):
         return "정보없음"
 
     try:
-        value = int(value)
-
-    except ValueError:
+        v = int(value)
+    except:
         return "정보없음"
 
-    if value <= 15:
+    if v <= 15:
         return "좋음"
 
-    elif value <= 35:
+    if v <= 35:
         return "보통"
 
-    elif value <= 75:
+    if v <= 75:
         return "나쁨"
 
+    return "매우 나쁨"
+
+
+# =========================================================
+# 행동 조언
+# =========================================================
+
+def make_advice(weather, air, max_feels):
+
+    advice = []
+
+    if weather["precip"]:
+        advice.append("우산 챙기기")
     else:
-        return "매우 나쁨"
+        advice.append("우산 필요 없음")
+
+    pm10 = pm10_grade(air["pm10"])
+    pm25 = pm25_grade(air["pm25"])
+
+    if (
+        pm10 in ["나쁨", "매우 나쁨"]
+        or pm25 in ["나쁨", "매우 나쁨"]
+    ):
+        advice.append("마스크 권장")
+
+    else:
+        advice.append("마스크 불필요")
+
+    if (
+        max_feels is not None
+        and max_feels >= 33
+    ):
+        advice.append("더위 대비")
+
+    return " · ".join(advice)
 
 
 # =========================================================
-# 메시지
+# 카드 이미지
 # =========================================================
 
-def make_message(
-    weather,
-    air,
-    base_date,
-    base_time
-):
+def create_weather_card(weather, air):
+
+    now = datetime.now(KST)
 
     max_feels = (
         get_max_apparent_temperature(
@@ -549,156 +508,317 @@ def make_message(
         air["pm25"]
     )
 
-    precip_bad = (
-        len(weather["precip"]) > 0
+    precip_bad = bool(
+        weather["precip"]
     )
 
-    pm10_bad = (
-        pm10_status
-        in [
-            "나쁨",
-            "매우 나쁨"
-        ]
-    )
+    pm10_bad = pm10_status in [
+        "나쁨",
+        "매우 나쁨"
+    ]
 
-    pm25_bad = (
-        pm25_status
-        in [
-            "나쁨",
-            "매우 나쁨"
-        ]
-    )
+    pm25_bad = pm25_status in [
+        "나쁨",
+        "매우 나쁨"
+    ]
 
     heat_bad = (
         max_feels is not None
         and max_feels >= 33
     )
 
-    if (
+    alert = (
         precip_bad
         or pm10_bad
         or pm25_bad
         or heat_bad
-    ):
+    )
 
-        status = "🚨 오늘 꼭 확인"
+    # 이미지
+    W = 1080
+    H = 1350
 
+    bg = (246, 246, 242)
+    dark = (28, 28, 30)
+    gray = (110, 110, 115)
+    line = (220, 220, 215)
+
+    if alert:
+        accent = (205, 62, 54)
+        status_text = "오늘 꼭 확인"
     else:
+        accent = (60, 120, 82)
+        status_text = "외출 무난"
 
-        status = "✅ 외출 무난"
+    img = Image.new(
+        "RGB",
+        (W, H),
+        bg
+    )
 
-    lines = [
-        status,
-        "",
-        "서울 동대문구 청량리동",
-        "",
-        f'현재 기온: '
-        f'{weather["current_temp"]}℃',
+    draw = ImageDraw.Draw(img)
 
-        f'오늘 최저: '
-        f'{weather["min_temp"]}℃',
+    font_small = get_font(34)
+    font_medium = get_font(45)
+    font_large = get_font(72, True)
+    font_temp = get_font(150, True)
+    font_status = get_font(52, True)
 
-        f'오늘 최고: '
-        f'{weather["max_temp"]}℃',
+    margin = 75
 
-        f'오늘 최대 강수확률: '
-        f'{weather["max_pop"]}%'
-    ]
+    # 날짜
+    date_text = (
+        now.strftime("%m월 %d일")
+        + " · 청량리동"
+    )
 
-    if max_feels is not None:
+    draw.text(
+        (margin, 65),
+        date_text,
+        font=font_small,
+        fill=gray
+    )
 
-        lines.append(
-            f'오늘 최고 체감온도: '
-            f'{max_feels:.1f}℃'
-        )
+    # 상태
+    draw.rounded_rectangle(
+        (
+            margin,
+            130,
+            W - margin,
+            240
+        ),
+        radius=32,
+        fill=accent
+    )
+
+    draw.text(
+        (
+            margin + 35,
+            157
+        ),
+        status_text,
+        font=font_status,
+        fill=(255, 255, 255)
+    )
+
+    # 현재 기온
+    draw.text(
+        (margin, 300),
+        f'{weather["current_temp"]}°',
+        font=font_temp,
+        fill=dark
+    )
+
+    draw.text(
+        (margin + 355, 375),
+        "현재 기온",
+        font=font_medium,
+        fill=gray
+    )
+
+    # 최저 최고 체감
+    y = 520
+
+    draw.text(
+        (margin, y),
+        "최저",
+        font=font_small,
+        fill=gray
+    )
+
+    draw.text(
+        (margin, y + 45),
+        f'{weather["min_temp"]}°',
+        font=font_large,
+        fill=dark
+    )
+
+    draw.text(
+        (370, y),
+        "최고",
+        font=font_small,
+        fill=gray
+    )
+
+    draw.text(
+        (370, y + 45),
+        f'{weather["max_temp"]}°',
+        font=font_large,
+        fill=dark
+    )
+
+    draw.text(
+        (665, y),
+        "최고 체감",
+        font=font_small,
+        fill=gray
+    )
+
+    feels_text = (
+        f"{max_feels:.1f}°"
+        if max_feels is not None
+        else "-"
+    )
+
+    draw.text(
+        (665, y + 45),
+        feels_text,
+        font=font_large,
+        fill=dark
+    )
+
+    # 구분선
+    draw.line(
+        (
+            margin,
+            700,
+            W - margin,
+            700
+        ),
+        fill=line,
+        width=3
+    )
+
+    # 강수
+    draw.text(
+        (margin, 755),
+        "강수",
+        font=font_small,
+        fill=gray
+    )
+
+    draw.text(
+        (margin, 805),
+        f'{weather["max_pop"]}%',
+        font=font_large,
+        fill=dark
+    )
 
     if weather["precip"]:
 
-        lines.append("")
-        lines.append("강수 예보:")
-
-        for time, amount in weather["precip"]:
-
-            formatted = (
-                f"{time[:2]}:"
-                f"{time[2:]}"
-            )
-
-            lines.append(
-                f"- {formatted} / {amount}"
-            )
-
-    else:
-
-        lines.append(
-            "예상 강수량: 강수 없음"
+        first_time, first_amount = (
+            weather["precip"][0]
         )
 
-    lines.append("")
-
-    if air["pm10"] is None:
-
-        pm10_text = "정보없음"
-
-    else:
-
-        pm10_text = (
-            f'{air["pm10"]}㎍/㎥'
+        rain_text = (
+            f"{first_time[:2]}:"
+            f"{first_time[2:]}  "
+            f"{first_amount}"
         )
 
-    if air["pm25"] is None:
-
-        pm25_text = "정보없음"
-
     else:
+        rain_text = "예상 강수 없음"
 
-        pm25_text = (
-            f'{air["pm25"]}㎍/㎥'
-        )
-
-    lines.append(
-        f"미세먼지 PM10: "
-        f"{pm10_status} / "
-        f"{pm10_text}"
+    draw.text(
+        (350, 820),
+        rain_text,
+        font=font_medium,
+        fill=dark
     )
 
-    lines.append(
-        f"초미세먼지 PM2.5: "
-        f"{pm25_status} / "
-        f"{pm25_text}"
+    # 구분선
+    draw.line(
+        (
+            margin,
+            935,
+            W - margin,
+            935
+        ),
+        fill=line,
+        width=3
     )
 
-    lines.extend([
-        "",
-        f'에어코리아 측정: '
-        f'{air["data_time"]}',
+    # 미세먼지
+    draw.text(
+        (margin, 985),
+        "미세먼지",
+        font=font_small,
+        fill=gray
+    )
 
-        f'기상청 발표: '
-        f'{base_date} {base_time}'
-    ])
+    pm10_value = (
+        air["pm10"]
+        if air["pm10"] is not None
+        else "-"
+    )
 
-    return "\n".join(lines)
+    draw.text(
+        (margin, 1035),
+        f"PM10  {pm10_status}  {pm10_value}",
+        font=font_medium,
+        fill=dark
+    )
+
+    pm25_value = (
+        air["pm25"]
+        if air["pm25"] is not None
+        else "-"
+    )
+
+    draw.text(
+        (margin, 1100),
+        f"PM2.5  {pm25_status}  {pm25_value}",
+        font=font_medium,
+        fill=dark
+    )
+
+    # 하단 조언
+    advice = make_advice(
+        weather,
+        air,
+        max_feels
+    )
+
+    draw.rounded_rectangle(
+        (
+            margin,
+            1190,
+            W - margin,
+            1285
+        ),
+        radius=28,
+        fill=(230, 230, 225)
+    )
+
+    draw.text(
+        (margin + 28, 1217),
+        advice,
+        font=font_small,
+        fill=dark
+    )
+
+    img.save(
+        OUTPUT_FILE,
+        quality=95
+    )
 
 
 # =========================================================
-# Telegram
+# Telegram 사진 전송
 # =========================================================
 
-def send_telegram(message):
+def send_telegram_photo():
 
     url = (
         f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
+        f"bot{BOT_TOKEN}/sendPhoto"
     )
 
-    response = requests.post(
-        url,
-        data={
-            "chat_id": CHAT_ID,
-            "text": message
-        },
-        timeout=20
-    )
+    with open(
+        OUTPUT_FILE,
+        "rb"
+    ) as image:
+
+        response = requests.post(
+            url,
+            data={
+                "chat_id": CHAT_ID
+            },
+            files={
+                "photo": image
+            },
+            timeout=30
+        )
 
     response.raise_for_status()
 
@@ -709,9 +829,7 @@ def send_telegram(message):
 
 def main():
 
-    items, base_date, base_time = (
-        get_weather()
-    )
+    items, _, _ = get_weather()
 
     weather = parse_weather(
         items
@@ -719,16 +837,16 @@ def main():
 
     air = get_air_quality()
 
-    message = make_message(
+    create_weather_card(
         weather,
-        air,
-        base_date,
-        base_time
+        air
     )
 
-    print(message)
+    send_telegram_photo()
 
-    send_telegram(message)
+    print(
+        "Weather card sent successfully."
+    )
 
 
 if __name__ == "__main__":
