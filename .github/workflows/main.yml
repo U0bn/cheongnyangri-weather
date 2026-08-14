@@ -2,11 +2,13 @@ name: Cheongnyangni Weather
 
 on:
   schedule:
-    # GitHub Actions cron은 UTC 기준
-    # UTC 22:30 = 한국시간 다음 날 07:30
-    - cron: "30 22 * * *"
+    # 한국시간 06:30 = UTC 전날 21:30
+    - cron: "30 21 * * *"
 
-  # Actions 화면에서 수동 실행도 가능
+    # 한국시간 13:00 = UTC 04:00
+    - cron: "0 4 * * *"
+
+  # 수동 테스트용
   workflow_dispatch:
 
 jobs:
