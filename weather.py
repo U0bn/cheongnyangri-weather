@@ -6,9 +6,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from urllib.parse import unquote
 
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-
 
 # =========================================================
 # 환경변수
@@ -22,49 +19,25 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 
 # =========================================================
-# 위치 설정
+# 위치
 # =========================================================
 
+# 청량리동 기상청 격자
 NX = 61
 NY = 127
 
+# 에어코리아
 AIR_STATION = "동대문구"
 
 KST = ZoneInfo("Asia/Seoul")
 
 
 # =========================================================
-# HTTP 세션 + 자동 재시도
-# =========================================================
-
-def create_session():
-    session = requests.Session()
-
-    retry = Retry(
-        total=4,
-        connect=4,
-        read=4,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"]
-    )
-
-    adapter = HTTPAdapter(max_retries=retry)
-
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-
-    return session
-
-
-SESSION = create_session()
-
-
-# =========================================================
-# 기상청 발표시각 계산
+# 기상청 발표 시각
 # =========================================================
 
 def get_base_datetime():
+
     now = datetime.now(KST)
 
     base_times = [
@@ -81,6 +54,7 @@ def get_base_datetime():
     available = []
 
     for bt in base_times:
+
         hour = int(bt[:2])
 
         dt = now.replace(
@@ -94,8 +68,11 @@ def get_base_datetime():
             available.append(dt)
 
     if available:
+
         base_dt = max(available)
+
     else:
+
         yesterday = now - timedelta(days=1)
 
         base_dt = yesterday.replace(
@@ -116,6 +93,7 @@ def get_base_datetime():
 # =========================================================
 
 def get_weather():
+
     base_date, base_time = get_base_datetime()
 
     url = (
@@ -134,10 +112,11 @@ def get_weather():
         "ny": NY
     }
 
-    response = SESSION.get(
+    # 이전에 실제 성공했던 방식
+    response = requests.get(
         url,
         params=params,
-        timeout=(20, 40)
+        timeout=20
     )
 
     response.raise_for_status()
@@ -147,6 +126,7 @@ def get_weather():
     header = data["response"]["header"]
 
     if header["resultCode"] != "00":
+
         raise Exception(
             f'기상청 API 오류: '
             f'{header["resultCode"]} '
@@ -154,7 +134,10 @@ def get_weather():
         )
 
     items = (
-        data["response"]["body"]["items"]["item"]
+        data["response"]
+        ["body"]
+        ["items"]
+        ["item"]
     )
 
     return items, base_date, base_time
@@ -165,13 +148,18 @@ def get_weather():
 # =========================================================
 
 def parse_weather(items):
+
     now = datetime.now(KST)
 
     today = now.strftime("%Y%m%d")
 
     hourly = {}
 
+    tmn = None
+    tmx = None
+
     for item in items:
+
         if item["fcstDate"] != today:
             continue
 
@@ -184,47 +172,83 @@ def parse_weather(items):
 
         hourly[fcst_time][category] = value
 
+        if category == "TMN":
+
+            try:
+                tmn = float(value)
+
+            except ValueError:
+                pass
+
+        if category == "TMX":
+
+            try:
+                tmx = float(value)
+
+            except ValueError:
+                pass
+
     if not hourly:
-        raise Exception("오늘 예보 데이터가 없습니다.")
+
+        raise Exception(
+            "오늘 예보 데이터가 없습니다."
+        )
 
     times = sorted(hourly.keys())
 
     current_hour = now.strftime("%H00")
 
     future_times = [
-        t for t in times
+        t
+        for t in times
         if t >= current_hour
     ]
 
     if future_times:
+
         current_time = future_times[0]
+
     else:
+
         current_time = times[-1]
 
     current = hourly[current_time]
 
-    current_temp = current.get("TMP", "?")
+    current_temp = current.get(
+        "TMP",
+        "?"
+    )
 
     temps = []
     pops = []
     precip = []
 
-    for t in times:
-        values = hourly[t]
+    for time in times:
+
+        values = hourly[time]
 
         if "TMP" in values:
+
             try:
-                temps.append(float(values["TMP"]))
+                temps.append(
+                    float(values["TMP"])
+                )
+
             except ValueError:
                 pass
 
         if "POP" in values:
+
             try:
-                pops.append(int(values["POP"]))
+                pops.append(
+                    int(values["POP"])
+                )
+
             except ValueError:
                 pass
 
         if "PCP" in values:
+
             pcp = values["PCP"]
 
             if pcp not in [
@@ -232,17 +256,40 @@ def parse_weather(items):
                 "0",
                 "0.0"
             ]:
-                precip.append((t, pcp))
 
-    min_temp = min(temps) if temps else "?"
-    max_temp = max(temps) if temps else "?"
-    max_pop = max(pops) if pops else 0
+                precip.append(
+                    (time, pcp)
+                )
+
+    # TMN/TMX가 없는 늦은 시각 발표에서는
+    # 임시로 남은 시간대의 TMP 사용
+    if tmn is None:
+
+        tmn = (
+            min(temps)
+            if temps
+            else "?"
+        )
+
+    if tmx is None:
+
+        tmx = (
+            max(temps)
+            if temps
+            else "?"
+        )
+
+    max_pop = (
+        max(pops)
+        if pops
+        else 0
+    )
 
     return {
         "current_time": current_time,
         "current_temp": current_temp,
-        "min_temp": min_temp,
-        "max_temp": max_temp,
+        "min_temp": tmn,
+        "max_temp": tmx,
         "max_pop": max_pop,
         "precip": precip,
         "hourly": hourly
@@ -254,23 +301,36 @@ def parse_weather(items):
 # =========================================================
 
 def wet_bulb_temperature(temp, rh):
+
     return (
         temp
         * math.atan(
             0.151977
-            * math.sqrt(rh + 8.313659)
+            * math.sqrt(
+                rh + 8.313659
+            )
         )
-        + math.atan(temp + rh)
-        - math.atan(rh - 1.67633)
+        + math.atan(
+            temp + rh
+        )
+        - math.atan(
+            rh - 1.67633
+        )
         + 0.00391838
         * (rh ** 1.5)
-        * math.atan(0.023101 * rh)
+        * math.atan(
+            0.023101 * rh
+        )
         - 4.686035
     )
 
 
 def apparent_temperature(temp, rh):
-    tw = wet_bulb_temperature(temp, rh)
+
+    tw = wet_bulb_temperature(
+        temp,
+        rh
+    )
 
     return (
         -0.2442
@@ -283,29 +343,41 @@ def apparent_temperature(temp, rh):
 
 
 def get_max_apparent_temperature(hourly):
-    values = []
 
-    for _, data in hourly.items():
-        if "TMP" not in data or "REH" not in data:
+    feels_list = []
+
+    for _, values in hourly.items():
+
+        if (
+            "TMP" not in values
+            or "REH" not in values
+        ):
             continue
 
         try:
-            temp = float(data["TMP"])
-            rh = float(data["REH"])
+
+            temp = float(
+                values["TMP"]
+            )
+
+            humidity = float(
+                values["REH"]
+            )
+
         except ValueError:
             continue
 
         feels = apparent_temperature(
             temp,
-            rh
+            humidity
         )
 
-        values.append(feels)
+        feels_list.append(feels)
 
-    if not values:
+    if not feels_list:
         return None
 
-    return max(values)
+    return max(feels_list)
 
 
 # =========================================================
@@ -313,6 +385,7 @@ def get_max_apparent_temperature(hourly):
 # =========================================================
 
 def get_air_quality():
+
     url = (
         "https://apis.data.go.kr/"
         "B552584/"
@@ -327,13 +400,13 @@ def get_air_quality():
         "pageNo": "1",
         "stationName": AIR_STATION,
         "dataTerm": "DAILY",
-        "ver": "1.3"
+        "ver": "1.4"
     }
 
-    response = SESSION.get(
+    response = requests.get(
         url,
         params=params,
-        timeout=(20, 40)
+        timeout=20
     )
 
     response.raise_for_status()
@@ -341,12 +414,22 @@ def get_air_quality():
     data = response.json()
 
     items = (
-        data.get("response", {})
-        .get("body", {})
-        .get("items", [])
+        data.get(
+            "response",
+            {}
+        )
+        .get(
+            "body",
+            {}
+        )
+        .get(
+            "items",
+            []
+        )
     )
 
     if not items:
+
         return {
             "pm10": None,
             "pm25": None,
@@ -355,17 +438,31 @@ def get_air_quality():
 
     item = items[0]
 
-    pm10 = item.get("pm10Value")
-    pm25 = item.get("pm25Value")
+    pm10 = item.get(
+        "pm10Value"
+    )
+
+    pm25 = item.get(
+        "pm25Value"
+    )
+
     data_time = item.get(
         "dataTime",
         "정보없음"
     )
 
-    if pm10 in [None, "", "-"]:
+    if pm10 in [
+        None,
+        "",
+        "-"
+    ]:
         pm10 = None
 
-    if pm25 in [None, "", "-"]:
+    if pm25 in [
+        None,
+        "",
+        "-"
+    ]:
         pm25 = None
 
     return {
@@ -380,45 +477,55 @@ def get_air_quality():
 # =========================================================
 
 def pm10_grade(value):
+
     if value is None:
         return "정보없음"
 
     try:
         value = int(value)
+
     except ValueError:
         return "정보없음"
 
     if value <= 30:
         return "좋음"
+
     elif value <= 80:
         return "보통"
+
     elif value <= 150:
         return "나쁨"
+
     else:
         return "매우 나쁨"
 
 
 def pm25_grade(value):
+
     if value is None:
         return "정보없음"
 
     try:
         value = int(value)
+
     except ValueError:
         return "정보없음"
 
     if value <= 15:
         return "좋음"
+
     elif value <= 35:
         return "보통"
+
     elif value <= 75:
         return "나쁨"
+
     else:
         return "매우 나쁨"
 
 
 # =========================================================
-# 메시지 생성
+# 메시지
 # =========================================================
 
 def make_message(
@@ -427,8 +534,11 @@ def make_message(
     base_date,
     base_time
 ):
-    max_feels = get_max_apparent_temperature(
-        weather["hourly"]
+
+    max_feels = (
+        get_max_apparent_temperature(
+            weather["hourly"]
+        )
     )
 
     pm10_status = pm10_grade(
@@ -439,19 +549,25 @@ def make_message(
         air["pm25"]
     )
 
-    precip_bad = len(
-        weather["precip"]
-    ) > 0
+    precip_bad = (
+        len(weather["precip"]) > 0
+    )
 
-    pm10_bad = pm10_status in [
-        "나쁨",
-        "매우 나쁨"
-    ]
+    pm10_bad = (
+        pm10_status
+        in [
+            "나쁨",
+            "매우 나쁨"
+        ]
+    )
 
-    pm25_bad = pm25_status in [
-        "나쁨",
-        "매우 나쁨"
-    ]
+    pm25_bad = (
+        pm25_status
+        in [
+            "나쁨",
+            "매우 나쁨"
+        ]
+    )
 
     heat_bad = (
         max_feels is not None
@@ -464,8 +580,11 @@ def make_message(
         or pm25_bad
         or heat_bad
     ):
+
         status = "🚨 오늘 꼭 확인"
+
     else:
+
         status = "✅ 외출 무난"
 
     lines = [
@@ -473,23 +592,33 @@ def make_message(
         "",
         "서울 동대문구 청량리동",
         "",
-        f'현재 기온: {weather["current_temp"]}℃',
-        f'오늘 최저: {weather["min_temp"]}℃',
-        f'오늘 최고: {weather["max_temp"]}℃',
-        f'오늘 최대 강수확률: {weather["max_pop"]}%'
+        f'현재 기온: '
+        f'{weather["current_temp"]}℃',
+
+        f'오늘 최저: '
+        f'{weather["min_temp"]}℃',
+
+        f'오늘 최고: '
+        f'{weather["max_temp"]}℃',
+
+        f'오늘 최대 강수확률: '
+        f'{weather["max_pop"]}%'
     ]
 
     if max_feels is not None:
+
         lines.append(
             f'오늘 최고 체감온도: '
             f'{max_feels:.1f}℃'
         )
 
     if weather["precip"]:
+
         lines.append("")
         lines.append("강수 예보:")
 
         for time, amount in weather["precip"]:
+
             formatted = (
                 f"{time[:2]}:"
                 f"{time[2:]}"
@@ -498,45 +627,45 @@ def make_message(
             lines.append(
                 f"- {formatted} / {amount}"
             )
+
     else:
+
         lines.append(
             "예상 강수량: 강수 없음"
         )
 
     lines.append("")
 
-    pm10_value = (
-        air["pm10"]
-        if air["pm10"] is not None
-        else "정보없음"
-    )
+    if air["pm10"] is None:
 
-    pm25_value = (
-        air["pm25"]
-        if air["pm25"] is not None
-        else "정보없음"
-    )
+        pm10_text = "정보없음"
+
+    else:
+
+        pm10_text = (
+            f'{air["pm10"]}㎍/㎥'
+        )
+
+    if air["pm25"] is None:
+
+        pm25_text = "정보없음"
+
+    else:
+
+        pm25_text = (
+            f'{air["pm25"]}㎍/㎥'
+        )
 
     lines.append(
         f"미세먼지 PM10: "
         f"{pm10_status} / "
-        f"{pm10_value}"
-        + (
-            "㎍/㎥"
-            if air["pm10"] is not None
-            else ""
-        )
+        f"{pm10_text}"
     )
 
     lines.append(
         f"초미세먼지 PM2.5: "
         f"{pm25_status} / "
-        f"{pm25_value}"
-        + (
-            "㎍/㎥"
-            if air["pm25"] is not None
-            else ""
-        )
+        f"{pm25_text}"
     )
 
     lines.extend([
@@ -556,18 +685,19 @@ def make_message(
 # =========================================================
 
 def send_telegram(message):
+
     url = (
         f"https://api.telegram.org/"
         f"bot{BOT_TOKEN}/sendMessage"
     )
 
-    response = SESSION.post(
+    response = requests.post(
         url,
         data={
             "chat_id": CHAT_ID,
             "text": message
         },
-        timeout=(20, 40)
+        timeout=20
     )
 
     response.raise_for_status()
@@ -578,6 +708,7 @@ def send_telegram(message):
 # =========================================================
 
 def main():
+
     items, base_date, base_time = (
         get_weather()
     )
