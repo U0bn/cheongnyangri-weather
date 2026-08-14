@@ -5,6 +5,8 @@ from zoneinfo import ZoneInfo
 from urllib.parse import unquote
 
 KMA_API_KEY = unquote(os.environ["KMA_API_KEY"])
+AIRKOREA_API_KEY = unquote(os.environ["AIRKOREA_API_KEY"])
+
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -12,14 +14,13 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 NX = 61
 NY = 127
 
+# 우선 동대문구 측정소 사용
+AIR_STATION = "동대문구"
+
 KST = ZoneInfo("Asia/Seoul")
 
 
 def get_base_datetime():
-    """
-    기상청 단기예보 발표시각 중
-    현재 시각보다 가장 최근 발표분을 선택
-    """
     now = datetime.now(KST)
 
     base_times = [
@@ -33,7 +34,6 @@ def get_base_datetime():
         h = int(bt[:2])
         dt = now.replace(hour=h, minute=0, second=0, microsecond=0)
 
-        # 발표 직후 API 반영 지연을 고려해 15분 여유
         if now >= dt + timedelta(minutes=15):
             available.append(dt)
 
@@ -94,15 +94,28 @@ def parse_weather(items):
 
     hourly = {}
 
-    for item in items:
-        fcst_date = item["fcstDate"]
+    tmn = None
+    tmx = None
 
-        if fcst_date != today:
+    for item in items:
+        if item["fcstDate"] != today:
             continue
 
         fcst_time = item["fcstTime"]
         category = item["category"]
         value = item["fcstValue"]
+
+        if category == "TMN":
+            try:
+                tmn = float(value)
+            except ValueError:
+                pass
+
+        if category == "TMX":
+            try:
+                tmx = float(value)
+            except ValueError:
+                pass
 
         if fcst_time not in hourly:
             hourly[fcst_time] = {}
@@ -114,9 +127,7 @@ def parse_weather(items):
 
     times = sorted(hourly.keys())
 
-    # 현재 시각에 가장 가까운 미래 예보
     current_hour = now.strftime("%H00")
-
     future_times = [t for t in times if t >= current_hour]
 
     if future_times:
@@ -126,7 +137,6 @@ def parse_weather(items):
 
     current = hourly[current_time]
 
-    # TMP = 시간별 기온
     current_temp = current.get("TMP", "?")
 
     temps = []
@@ -154,29 +164,117 @@ def parse_weather(items):
             if pcp not in ["강수없음", "0", "0.0"]:
                 precip.append((t, pcp))
 
-    min_temp = min(temps) if temps else "?"
-    max_temp = max(temps) if temps else "?"
+    if tmn is None:
+        tmn = min(temps) if temps else "?"
 
-    max_pop = max(pops) if pops else 0
+    if tmx is None:
+        tmx = max(temps) if temps else "?"
 
     return {
         "current_time": current_time,
         "current_temp": current_temp,
-        "min_temp": min_temp,
-        "max_temp": max_temp,
-        "max_pop": max_pop,
+        "min_temp": tmn,
+        "max_temp": tmx,
+        "max_pop": max(pops) if pops else 0,
         "precip": precip,
         "hourly": hourly
     }
 
 
-def make_message(weather, base_date, base_time):
+def get_air_quality():
+    url = (
+        "https://apis.data.go.kr/B552584/"
+        "ArpltnInforInqireSvc/getMsrstnAcctoRltmMesureDnsty"
+    )
+
+    params = {
+        "serviceKey": AIRKOREA_API_KEY,
+        "returnType": "json",
+        "numOfRows": "1",
+        "pageNo": "1",
+        "stationName": AIR_STATION,
+        "dataTerm": "DAILY",
+        "ver": "1.4"
+    }
+
+    response = requests.get(url, params=params, timeout=20)
+    response.raise_for_status()
+
+    data = response.json()
+
+    items = data.get("response", {}).get("body", {}).get("items", [])
+
+    if not items:
+        raise Exception("에어코리아 측정값이 없습니다.")
+
+    item = items[0]
+
+    def parse_value(value):
+        if value in [None, "-", ""]:
+            return None
+
+        try:
+            return float(value)
+        except ValueError:
+            return None
+
+    return {
+        "pm10": parse_value(item.get("pm10Value")),
+        "pm25": parse_value(item.get("pm25Value")),
+        "time": item.get("dataTime", "?")
+    }
+
+
+def pm10_grade(value):
+    if value is None:
+        return "정보없음"
+
+    if value <= 30:
+        return "좋음"
+    elif value <= 80:
+        return "보통"
+    elif value <= 150:
+        return "나쁨"
+    else:
+        return "매우나쁨"
+
+
+def pm25_grade(value):
+    if value is None:
+        return "정보없음"
+
+    if value <= 15:
+        return "좋음"
+    elif value <= 35:
+        return "보통"
+    elif value <= 75:
+        return "나쁨"
+    else:
+        return "매우나쁨"
+
+
+def make_message(weather, air, base_date, base_time):
     precip_exists = len(weather["precip"]) > 0
 
-    if precip_exists:
+    pm10_bad = air["pm10"] is not None and air["pm10"] > 80
+    pm25_bad = air["pm25"] is not None and air["pm25"] > 35
+
+    if precip_exists or pm10_bad or pm25_bad:
         status = "🚨 오늘 꼭 확인"
     else:
         status = "✅ 외출 무난"
+
+    pm10_value = (
+        f'{air["pm10"]:.0f}㎍/㎥'
+        if air["pm10"] is not None
+        else "정보없음"
+    )
+
+    pm25_value = (
+        f'{air["pm25"]:.0f}㎍/㎥'
+        if air["pm25"] is not None
+        else "정보없음"
+    )
 
     lines = [
         status,
@@ -187,10 +285,10 @@ def make_message(weather, base_date, base_time):
         f'오늘 최저: {weather["min_temp"]}℃',
         f'오늘 최고: {weather["max_temp"]}℃',
         f'오늘 최대 강수확률: {weather["max_pop"]}%',
+        ""
     ]
 
     if weather["precip"]:
-        lines.append("")
         lines.append("강수 예보:")
 
         for time, amount in weather["precip"]:
@@ -201,6 +299,10 @@ def make_message(weather, base_date, base_time):
 
     lines.extend([
         "",
+        f'미세먼지 PM10: {pm10_grade(air["pm10"])} / {pm10_value}',
+        f'초미세먼지 PM2.5: {pm25_grade(air["pm25"])} / {pm25_value}',
+        "",
+        f'에어코리아 측정: {air["time"]}',
         f"기상청 발표: {base_date} {base_time}"
     ])
 
@@ -226,8 +328,11 @@ def main():
     items, base_date, base_time = get_weather()
     weather = parse_weather(items)
 
+    air = get_air_quality()
+
     message = make_message(
         weather,
+        air,
         base_date,
         base_time
     )
