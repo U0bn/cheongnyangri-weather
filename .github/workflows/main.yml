@@ -16,6 +16,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install requests
+        run: pip install requests
+
       - name: Run weather.py
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
